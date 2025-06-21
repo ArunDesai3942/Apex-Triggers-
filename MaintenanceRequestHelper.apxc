@@ -1,0 +1,91 @@
+public with sharing class MaintenanceRequestHelper {
+    
+    public static void updateWorkOrders(List<Case> caseList, Map<Id, Case> caseMap) {
+        Set<Id> closedCaseIds = new Set<Id>();
+        
+      
+        for (Case c : caseList) {
+            Case oldC = caseMap.get(c.Id);
+            if (oldC.Status != 'Closed' && c.Status == 'Closed' && 
+                (c.Type == 'Routine Maintenance' || c.Type == 'Repair')) {
+                    closedCaseIds.add(c.Id);
+                }
+        }
+        
+        
+        Map<Id, Integer> caseToMinCycleMap = new Map<Id, Integer>();
+        Map<Id, List<Id>> caseToEquipmentListMap = new Map<Id, List<Id>>();
+        
+        for (Equipment_Maintenance_Item__c item : [
+            SELECT Maintenance_Request__c, Equipment__c, Equipment__r.Maintenance_Cycle__c 
+            FROM Equipment_Maintenance_Item__c 
+            WHERE Maintenance_Request__c IN :closedCaseIds
+        ]) {
+            Id caseId = item.Maintenance_Request__c;
+            Integer cycle = Integer.valueOf(item.Equipment__r.Maintenance_Cycle__c);
+            
+            if (cycle != null) {
+                if (!caseToMinCycleMap.containsKey(caseId) || cycle < caseToMinCycleMap.get(caseId)) {
+                    caseToMinCycleMap.put(caseId, cycle);
+                }
+            }
+            
+            if (!caseToEquipmentListMap.containsKey(caseId)) {
+                caseToEquipmentListMap.put(caseId, new List<Id>());
+            }
+            caseToEquipmentListMap.get(caseId).add(item.Equipment__c);
+        }
+        
+        
+        List<Case> casesToInsert = new List<Case>();
+        Date todayDate = Date.today();
+        Map<Id, Case> oldToNewCaseMap = new Map<Id, Case>();
+        
+        for (Case c : [
+            SELECT Id, Vehicle__c, ProductId, Subject
+            FROM Case 
+            WHERE Id IN :closedCaseIds
+        ]) {
+            Case newCase = new Case();
+            newCase.Vehicle__c = c.Vehicle__c;
+            newCase.Type = 'Routine Maintenance';
+            newCase.Date_Reported__c = todayDate;
+            newCase.Subject = c.Subject != null ? c.Subject : 'Scheduled Maintenance';
+            newCase.ProductId = c.ProductId;
+            
+            Integer cycle = caseToMinCycleMap.get(c.Id);
+            if (cycle != null) {
+                newCase.Date_Due__c = todayDate.addDays(cycle);
+            }
+            
+            casesToInsert.add(newCase);
+            oldToNewCaseMap.put(c.Id, newCase);  // map old case to new case
+        }
+        
+        if (!casesToInsert.isEmpty()) {
+            insert casesToInsert;
+        }
+        
+        // Step 5: Create new Equipment Maintenance Items for new Cases
+        List<Equipment_Maintenance_Item__c> newItems = new List<Equipment_Maintenance_Item__c>();
+        
+        for (Id oldCaseId : oldToNewCaseMap.keySet()) {
+            Id newCaseId = oldToNewCaseMap.get(oldCaseId).Id;
+            List<Id> equipmentIds = caseToEquipmentListMap.get(oldCaseId);
+            
+            if (equipmentIds != null) {
+                for (Id equipmentId : equipmentIds) {
+                    newItems.add(new Equipment_Maintenance_Item__c(
+                        Maintenance_Request__c = newCaseId,
+                        Equipment__c = equipmentId
+                    ));
+                }
+            }
+        }
+        
+        if (!newItems.isEmpty()) {
+            insert newItems;
+        }
+        
+    }
+}
